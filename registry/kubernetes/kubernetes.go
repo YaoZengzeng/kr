@@ -36,6 +36,9 @@ type Registry struct {
 
 	// Time To Live for a service, default is 60 * time.Second.
 	ttl time.Duration
+	// If the service expired, we would not clean it up immediately,
+	// otherwise we would every cleanup period in batch (10 * time.Minute in default).
+	cleanup time.Duration
 }
 
 func NewRegistry() (*Registry, error) {
@@ -50,11 +53,11 @@ func NewRegistry() (*Registry, error) {
 		return nil, err
 	}
 
-	return newRegistry(clientset, 60 * time.Second)
+	return newRegistry(clientset, 60*time.Second, 10*time.Minute)
 }
 
 // Easy for test: take fake.NewSimpleClientset() as input.
-func newRegistry(clientset kubernetes.Interface, ttl time.Duration) (*Registry, error) {
+func newRegistry(clientset kubernetes.Interface, ttl time.Duration, cleanup time.Duration) (*Registry, error) {
 	informers := informers.NewSharedInformerFactory(clientset, 0)
 
 	endpointInformer := informers.Core().V1().Endpoints().Informer()
@@ -66,13 +69,17 @@ func newRegistry(clientset kubernetes.Interface, ttl time.Duration) (*Registry, 
 		return nil, fmt.Errorf("failed to wait endpoint informer synced")
 	}
 
-	return &Registry{
+	registry := &Registry{
 		client: clientset.CoreV1().Endpoints(apiv1.NamespaceDefault),
 		// Only operate endpoints in default namespace.
-		lister: informers.Core().V1().Endpoints().Lister().Endpoints(apiv1.NamespaceDefault),
+		lister:  informers.Core().V1().Endpoints().Lister().Endpoints(apiv1.NamespaceDefault),
+		ttl:     ttl,
+		cleanup: cleanup,
+	}
 
-		ttl: ttl,
-	}, nil
+	go registry.Cleanup()
+
+	return registry, nil
 }
 
 type Item struct {
@@ -147,6 +154,47 @@ func (r *Registry) Register(service *types.Service) error {
 	}
 
 	return nil
+}
+
+// Cleanup try to clean up the expired service in best effort. It's OK if we don't clean up in time
+// or clean up incorrectly. If the servcie keep register, mistakes will always be corrected.
+func (r *Registry) Cleanup() {
+	ticker := time.NewTicker(r.cleanup)
+	for {
+		<-ticker.C
+
+		endpoints, err := r.lister.List(labels.SelectorFromSet(labels.Set{labelKey: labelValue}))
+		if err != nil {
+			log.Printf("list endpoints failed in Cleanup(): %v", err)
+		}
+
+		now := time.Now()
+
+		var names []string
+		for _, endpoint := range endpoints {
+			value := endpoint.Annotations[annotationKey]
+			item := &Item{}
+			err := json.Unmarshal([]byte(value), item)
+			if err != nil {
+				log.Printf("failed to unmarshal registered service from %v\n", endpoint.Name)
+				continue
+			}
+
+			if item.Update.Add(r.ttl).Before(now) {
+				// The registered service has expired, clean it up.
+				names = append(names, endpoint.Name)
+			}
+		}
+
+		foregroundDelete := metav1.DeletePropagationForeground
+		for _, name := range names {
+			err := r.client.Delete(name, &metav1.DeleteOptions{PropagationPolicy: &foregroundDelete})
+			// TODO: handle this error properly.
+			if err != nil {
+				log.Printf("failed to delete endpoint %v\n", name)
+			}
+		}
+	}
 }
 
 func (r *Registry) ListServices() ([]*types.Service, error) {

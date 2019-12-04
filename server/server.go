@@ -7,12 +7,11 @@ import (
 	"strconv"
 
 	"github.com/YaoZengzeng/kr/registry"
-	"github.com/YaoZengzeng/kr/registry/memory"
 	"github.com/YaoZengzeng/kr/types"
 )
 
 type Server struct {
-	Registry	registry.Registry
+	Registry registry.Registry
 }
 
 func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
@@ -41,9 +40,9 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = s.Registry.Register(&types.Service{
-		Address:	paramAddress[0],
-		Port:		port,
-		Endpoint:	paramEndpoint[0],
+		Address:  paramAddress[0],
+		Port:     port,
+		Endpoint: paramEndpoint[0],
 	})
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to register service"), http.StatusInternalServerError)
@@ -52,14 +51,9 @@ func (s *Server) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func New() (*Server, error){
-	registry, err := memory.NewRegistry()
-	if err != nil {
-		return nil, fmt.Errorf("create new registry failed: %v", err)
-	}
-
+func New(registry registry.Registry) (*Server, error) {
 	return &Server{
-		Registry:	registry,
+		Registry: registry,
 	}, nil
 }
 
@@ -67,6 +61,6 @@ func (s *Server) Run() error {
 	http.HandleFunc("/register", s.HandleRegister)
 
 	log.Printf("start serving request...")
-	
-	return http.ListenAndServe(":8080", nil)
+
+	return http.ListenAndServe(":10812", nil)
 }
